@@ -1,0 +1,189 @@
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.distributions import Normal
+from torch.optim import Adam
+from collections import deque
+
+class ReplayMemory:
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.buffer = deque(maxlen = capacity)
+        self.position = 0
+    def push(self, state, action, reward, next_state, done):
+        '''if len(self.buffer)<self.capacity:
+            self.buffer.append(None)
+        self.buffer[self.position] = (state, action, reward, next_state, done)
+        self.position = int((self.position+1)%self.capacity)'''
+        self.buffer.insert(0,(state, action, reward, next_state, done))
+    def sample(self, batch_size, c_k):
+        N = len(self.buffer)
+        if c_k>N:
+            c_k = N
+        indices = np.random.choice(c_k, batch_size)
+        batch = [self.buffer[idx] for idx in indices]
+        #batch = random.sample(self.buffer,batch_size)
+        state, action, reward, next_state, done = map(np.stack,zip(*batch))
+        return state, action, reward, next_state, done
+    def __len__(self):
+        return len(self.buffer)
+    
+def soft_update(target,source,tau):
+    for target_param, param in zip(target.parameters(),source.parameters()):
+        target_param.data.copy_(target_param.data*(1.0-tau)+param.data*tau)
+        
+def hard_update(target,source):
+    for target_param, param in zip(target.parameters(),source.parameters()):
+        target_param.data.copy_(param.data)
+        
+def weights_init_(m):
+    if isinstance(m, nn.Linear):
+        torch.nn.init.xavier_uniform_(m.weight, gain=1)
+        torch.nn.init.constant_(m.bias, 0)
+
+class QNetwork(nn.Module):
+    def __init__(self,num_inputs,num_actions,hidden_dim):
+        super(QNetwork,self).__init__()
+        self.fc1 = nn.Linear(num_inputs+num_actions,hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim,hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim,1)
+        
+        self.fc4 = nn.Linear(num_inputs+num_actions,hidden_dim)
+        self.fc5 = nn.Linear(hidden_dim,hidden_dim)
+        self.fc6 = nn.Linear(hidden_dim,1)
+        self.apply(weights_init_)
+        
+    def forward(self,state,action):
+        sa = torch.cat([state,action],1)
+        x1 = F.relu(self.fc1(sa))
+        x1 = F.relu(self.fc2(x1))
+        x1 = self.fc3(x1)
+        
+        x2 = F.relu(self.fc4(sa))
+        x2 = F.relu(self.fc5(x2))
+        x2 = self.fc6(x2)
+        return x1, x2
+    
+LOG_SIG_MAX = 2
+LOG_SIG_MIN = -20
+epsilon = 1e-6
+class GaussianPolicy(nn.Module):
+    def __init__(self, num_inputs, num_actions, hidden_dim, action_space=None):
+        super(GaussianPolicy,self).__init__()
+        
+        self.fc1 = nn.Linear(num_inputs,hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim,hidden_dim)
+        self.mean = nn.Linear(hidden_dim,num_actions)
+        self.log_std = nn.Linear(hidden_dim,num_actions)
+        
+        if action_space is None:
+            self.action_scale = torch.tensor([1,1,1,1,1/3,0.25])
+            self.action_bias = torch.tensor([0,0,0,0,2/3,0.75])
+        else:
+            self.action_scale = torch.FloatTensor(
+                (action_space.high - action_space.low) / 2.)
+            self.action_bias = torch.FloatTensor(
+                (action_space.high + action_space.low) / 2.)
+        self.apply(weights_init_)
+    def forward(self,state):
+        x = F.relu(self.fc1(state))
+        x = F.relu(self.fc2(x))
+        mean = self.mean(x)
+        log_std = self.log_std(x)
+        log_std = torch.clamp(log_std, min=LOG_SIG_MIN, max=LOG_SIG_MAX)
+        return mean, log_std
+    def sample(self, state):
+        mean, log_std = self.forward(state)
+        std = log_std.exp()
+        normal = Normal(mean,std)
+        x_t = normal.rsample()
+        y_t = torch.tanh(x_t)
+        action = y_t*self.action_scale+self.action_bias                                                                             
+        log_prob = normal.log_prob(x_t)
+        log_prob -= torch.log(self.action_scale * (1 - y_t.pow(2)) + epsilon)
+        log_prob = log_prob.sum(1, keepdim=True)
+        mean = torch.tanh(mean) * self.action_scale + self.action_bias
+        return action, log_prob, mean
+    
+    def to(self, device):
+        self.action_scale = self.action_scale.to(device)
+        self.action_bias = self.action_bias.to(device)
+        return super(GaussianPolicy, self).to(device)
+    
+class sac_agent():
+    def __init__(self, num_inputs, num_actions, action_space, device, hidden_size,lr,gamma, tau, alpha):
+        self.gamma = gamma
+        self.tau = tau
+        self.alpha = alpha
+        self.device = device
+        
+        self.critic = QNetwork(num_inputs, num_actions, hidden_size).to(self.device)
+        self.critic_optim = Adam(self.critic.parameters(),lr=lr)
+        self.critic_target = QNetwork(num_inputs, num_actions, hidden_size).to(self.device)
+        hard_update(self.critic_target,self.critic)
+        
+        self.policy = GaussianPolicy(num_inputs, num_actions, hidden_size, action_space).to(self.device)
+        self.policy_optim = Adam(self.policy.parameters(),lr=lr)
+        
+        self.log_alpha = torch.tensor([np.log(alpha)], requires_grad=True, device=self.device, dtype=torch.float32)
+        self.alpha_optim = Adam([self.log_alpha], lr=lr)
+        self.target_entropy = -torch.prod(torch.Tensor([num_actions]).to(self.device)).item()        
+    
+    def select_action(self, state, eval=False):
+        state = torch.FloatTensor(state).to(self.device).unsqueeze(0)
+        if eval == False:
+            action, _, _ = self.policy.sample(state)
+        else:
+            _, _, action = self.policy.sample(state)
+        return action.detach().cpu().numpy()[0]
+    
+    def update_parameters(self, memory, batch_size, c_k, train_pi = True):
+        states, actions, rewards, next_states, masks = memory.sample(batch_size,c_k)
+        states = torch.FloatTensor(states).to(self.device)
+        actions = torch.FloatTensor(actions).to(self.device)
+        rewards = torch.FloatTensor(rewards).to(self.device).unsqueeze(1)
+        next_states = torch.FloatTensor(next_states).to(self.device)
+        masks = torch.FloatTensor(masks).to(self.device).unsqueeze(1)
+        
+        with torch.no_grad():
+            next_actions, next_state_log_pi, _ = self.policy.sample(next_states)
+            q1_next_target, q2_next_target = self.critic_target(next_states,next_actions)
+            min_q_next_target = torch.min(q1_next_target,q2_next_target)-self.alpha*next_state_log_pi
+            next_q_value = rewards+masks*self.gamma*min_q_next_target
+            
+        q1, q2 = self.critic(states,actions)
+        
+        q_loss = F.mse_loss(q1, next_q_value) + F.mse_loss(q2, next_q_value)
+        self.critic_optim.zero_grad()
+        q_loss.backward()
+        
+        '''
+        total_norm = 0
+        for p in self.critic.parameters():
+            param_norm = p.grad.data.norm(2)
+            total_norm += param_norm.item() ** 2
+        total_norm = total_norm ** (1. / 2)
+        print(total_norm)'''
+        
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 5, norm_type=2.0)
+        self.critic_optim.step()
+        
+        if train_pi:
+            pi, log_pi,_ = self.policy.sample(states)
+            q1_pi, q2_pi = self.critic(states, pi)
+            min_q_pi = torch.min(q1_pi, q2_pi)
+            policy_loss = (self.alpha*log_pi-min_q_pi).mean()
+            self.policy_optim.zero_grad()
+            policy_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 1, norm_type=2.0)
+            self.policy_optim.step()
+            
+            alpha_loss = -(self.log_alpha*(log_pi+self.target_entropy).detach()).mean()
+            self.alpha_optim.zero_grad()
+            alpha_loss.backward()
+            self.alpha_optim.step()
+            self.alpha = self.log_alpha.detach().exp()
+        
+        soft_update(self.critic_target,self.critic,self.tau)
+
