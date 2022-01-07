@@ -2,6 +2,7 @@ from matplotlib import pyplot as plt
 from IPython.display import clear_output
 import pandas as pd
 import matplotlib
+from Environment.Builder_Env import circle
 
 def plot_graph(reward_history, avg_reward, ax = None):
     df = pd.DataFrame({'x': range(len(reward_history)), 'Reward': reward_history, 'Average': avg_reward})
@@ -58,5 +59,25 @@ def show_step(img, offset_nm, len_nm, start_nm, end_nm, atom_position, atom_star
     ax.arrow(start_nm[0], start_nm[1], (end_nm - start_nm)[0], (end_nm - start_nm)[1],width=0.1, length_includes_head = True)
     ax.text(offset_nm[0]+0.5*len_nm[0], offset_nm[1]+len_nm[0], 'bias(mV):{:.2f}, current(nA):{:.2f}'.format(mvolt,pcurrent/1000))
     plt.legend(frameon=False, labelcolor= 'white')
+    plt.show()
+    
+    
+def plot_large_frame(img, offset_nm, len_nm, design, start, i):
+    fig, ax = plt.subplots()
+    extent = (offset_nm[0]-0.5*len_nm[0], offset_nm[0]+0.5*len_nm[0], offset_nm[1]+len_nm[0], offset_nm[1])
+    ax.imshow(img, extent = extent)
+    for g in design:
+            x, y = circle(g[0], g[1], r)
+            ax.plot(x,y, color='#A45D5D')
+    for g in start:
+        x, y = circle(g[0], g[1], r)
+        ax.plot(x,y, color='#4A403A')
+        
+    for j in range(start.shape[0]):
+        plt.arrow(start[j,0],start[j,1], (design-start)[j,0], (design-start)[j,1], width=0.1,length_includes_head=True, color='#FFC069')
+        fs = 14
+        if j==i:
+            fs = 20
+        ax.annotate(j, (start[j,0], start[j,1]), fontsize=fs)
     plt.show()
 

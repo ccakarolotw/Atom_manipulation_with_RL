@@ -5,18 +5,14 @@ import torch.nn.functional as F
 from torch.distributions import Normal
 from torch.optim import Adam
 from collections import deque
+import copy
 
 class ReplayMemory:
     def __init__(self, capacity):
         self.capacity = capacity
         self.buffer = deque(maxlen = capacity)
-        self.position = 0
-    def push(self, state, action, reward, next_state, done):
-        '''if len(self.buffer)<self.capacity:
-            self.buffer.append(None)
-        self.buffer[self.position] = (state, action, reward, next_state, done)
-        self.position = int((self.position+1)%self.capacity)'''
-        self.buffer.insert(0,(state, action, reward, next_state, done))
+    def push(self, state, action, reward, next_state, mask):
+        self.buffer.insert(0,(state, action, reward, next_state, mask))
     def sample(self, batch_size, c_k):
         N = len(self.buffer)
         if c_k>N:
@@ -24,10 +20,53 @@ class ReplayMemory:
         indices = np.random.choice(c_k, batch_size)
         batch = [self.buffer[idx] for idx in indices]
         #batch = random.sample(self.buffer,batch_size)
-        state, action, reward, next_state, done = map(np.stack,zip(*batch))
-        return state, action, reward, next_state, done
+        state, action, reward, next_state, mask = map(np.stack,zip(*batch))
+        return state, action, reward, next_state, mask
     def __len__(self):
         return len(self.buffer)
+
+class HerReplayMemory(ReplayMemory):
+    def __init__(self, capacity, env):
+        super(HerReplayMemory, self).__init__(capacity)
+        self.env = env
+    def sample(self, batch_size, c_k):
+        N = len(self.buffer)
+        if c_k>N:
+            c_k = N
+        indices = np.random.choice(c_k, int(batch_size/self.n_sampled_goal))
+        batch = []
+        for idx in indices:
+            batch.append(self.buffer[idx])
+            state, action, reward, next_state, mask = self.buffer[idx]
+            print('old state:', state, 'old next state:', next_state, 'old reward:', reward)
+            i = copy.copy(idx)   
+            while True:
+                _,_,_,n,m = self.buffer[i]
+                i-=1
+                if not m:
+                    new_goal = n[:2]
+                    break
+            state[:2] = new_goal
+            next_state[:2] = new_goal
+            old_value = self.calculate_value(state)
+            new_value = self.calculate_value(next_state)
+            reward = self.env.default_reward + new_value - old_value
+            batch.append((state, action, reward, next_state, mask))
+            print('new state:', state, 'new next state:', next_state, 'new reward:', reward)
+        state, action, reward, next_state, mask = map(np.stack,zip(*batch))
+        return state, action, reward, next_state, mask
+   
+    def calculate_value(self, state):
+        goal_nm = state[:2]*self.env.goal_nm
+        atom_nm = state[2:]*self.env.goal_nm
+        dist_destination = np.linalg.norm(atom_nm - goal_nm)
+        a = atom_nm
+        b = goal_nm
+        cos_similarity_destination = np.inner(a,b)/(self.env.goal_nm*np.clip(np.linalg.norm(a), a_min=self.env.goal_nm, a_max=None))
+        value = self.env.calculate_value(dist_destination, cos_similarity_destination)
+        return value
+
+
     
 def soft_update(target,source,tau):
     for target_param, param in zip(target.parameters(),source.parameters()):

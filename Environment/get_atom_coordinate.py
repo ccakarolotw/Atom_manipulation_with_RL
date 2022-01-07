@@ -6,7 +6,7 @@ from skimage import morphology, measure
 from scipy.spatial.distance import cdist as cdist
 import pdb
 
-def template_matching(img, template, template_max_y, i = 0):
+def template_matching(img, template, template_max_y, bottom = True):
     '''
     Arguments:
     img, template: (0-255)
@@ -23,13 +23,18 @@ def template_matching(img, template, template_max_y, i = 0):
     max_val = max(template_max, img_max)
     template = (255*(template - min_val)/(max_val - min_val)).astype(np.uint8)
     img = (255*(img - min_val)/(max_val - min_val)).astype(np.uint8)
-    res = cv2.matchTemplate(img[template_max_y:,:],template,method)
+    if bottom:
+        res = cv2.matchTemplate(img[template_max_y:,:],template,method)
+    else:
+        res = cv2.matchTemplate(img[:template_max_y,:],template,method)
+        
     min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
     if method in [cv2.TM_SQDIFF, cv2.TM_SQDIFF_NORMED]:
         bottom_left = min_loc
     else:
         bottom_left = max_loc
-    bottom_left = (bottom_left[0], bottom_left[1]+template_max_y)
+    if bottom:
+        bottom_left = (bottom_left[0], bottom_left[1]+template_max_y)
     top_right = (bottom_left[0]+w, bottom_left[1]+h)
     '''fig, ax = plt.subplots()
     ax.imshow(img, cmap='gray')
@@ -41,10 +46,6 @@ def template_matching(img, template, template_max_y, i = 0):
 def blob_detection(img):
     ###set BlobDetector params https://learnopencv.com/blob-detection-using-opencv-python-c/
     img = np.array(img)
-    #img = np.clip(img, a_min = np.percentile(img, 50), a_max = None)
-
-    #img -= np.mean(img)
-    #img = (img>1.5*np.std(img)).astype(int)
     img = (255*((img-np.min(img))/(np.max(img)-np.min(img)))).astype('uint8')
     #kernel = np.ones((3,3),np.float32)/9
     #img = cv2.filter2D(img,-1,kernel)
@@ -87,13 +88,12 @@ def atom_detection(img, bottom_left, top_right):
     return atom_pixel
 
 def pixel_to_nm(pixel, img, offset_nm, len_nm):
-    #nm = np.zeros_like(pixel)
     nm = pixel*np.array([len_nm[0]/img.shape[0],len_nm[1]/img.shape[1]]) + np.array([offset_nm[0]-len_nm[0]/2, offset_nm[1]])
     return nm
 
-def get_atom_coordinate_nm(img, offset_nm, len_nm, template, template_max_y):
+def get_atom_coordinate_nm(img, offset_nm, len_nm, template, template_max_y, bottom=True):
     if template is not None:
-        bottom_left_pixel, top_right_pixel = template_matching(img, template,template_max_y, i = 0)
+        bottom_left_pixel, top_right_pixel = template_matching(img, template,template_max_y, bottom)
         atom_pixel = atom_detection(img, bottom_left_pixel, top_right_pixel)
         bottom_left_nm = pixel_to_nm(bottom_left_pixel, img, offset_nm, len_nm)
         top_right_nm = pixel_to_nm(top_right_pixel, img, offset_nm, len_nm)
@@ -107,7 +107,14 @@ def get_atom_coordinate_nm(img, offset_nm, len_nm, template, template_max_y):
         atom_nm = atom_nm[np.argmin(dist),:]
     return atom_nm, (atom_nm - bottom_left_nm), bottom_left_nm, wh
 
-
+def get_atom_coordinate_nm_with_anchor(img, offset_nm, len_nm, anchor_nm):
+    atom_pixel = atom_detection(img, np.array([0,0]), np.array([0,0]))
+    atoms_nm = pixel_to_nm(atom_pixel, img, offset_nm, len_nm)
+    dist = cdist(atoms_nm.reshape((-1,2)), anchor_nm.reshape((-1,2)))
+    anchor_nm_ = atoms_nm[np.argmin(dist),:]
+    atom_nm = atoms_nm[np.argmax(dist),:]
+    return atom_nm, anchor_nm_
+    
 def get_all_atom_coordinate_nm(img, offset_nm, len_nm):
     atom_pixel = atom_detection(img, np.array([0,0]), np.array([0,0]))
     atom_nm = pixel_to_nm(atom_pixel, img, offset_nm, len_nm)
@@ -127,7 +134,7 @@ def subtract_plane(im):
     im -= np.array(plane).astype(float)
     return im
 
-def get_region_centroids(im,diamond_size=3, sigmaclip=1, show=False):
+def get_region_centroids(im,diamond_size=3, sigmaclip=1.5, show=False):
     im = subtract_plane(im)
     #plt.imshow(im)
     #plt.show()

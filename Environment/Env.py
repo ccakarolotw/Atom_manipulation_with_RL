@@ -1,11 +1,10 @@
 from Environment.createc_control import Createc_Controller
-from Environment.get_atom_coordinate import get_atom_coordinate_nm, get_all_atom_coordinate_nm
-
 import numpy as np
 from matplotlib import pyplot as plt
-'''import get_atom_coordinate
-import importlib
-importlib.reload(get_atom_coordinate)'''
+#import get_atom_coordinate
+#import importlib
+#importlib.reload(get_atom_coordinate)
+from Environment.get_atom_coordinate import get_atom_coordinate_nm
 import scipy.spatial as spatial
 import findiff
 import pdb
@@ -13,7 +12,7 @@ import scipy
 class RealExpEnv:
     
     def __init__(self, step_nm, max_mvolt, max_pcurrent_to_mvolt_ratio, goal_nm, template, current_jump, im_size_nm, offset_nm,
-                 manip_limit_nm, pixel, template_max_y, template_min_x, scan_mV, max_len, correct_drift = False):
+                 manip_limit_nm, pixel, template_max_y, template_min_x, scan_mV, max_len, correct_drift = False, bottom = True):
         
         self.step_nm = step_nm
         self.max_mvolt = max_mvolt
@@ -25,7 +24,9 @@ class RealExpEnv:
         self.createc_controller = Createc_Controller(im_size_nm, offset_nm, pixel, scan_mV)
         self.current_jump = current_jump
         self.manip_limit_nm = manip_limit_nm
-        self.inner_limit_nm = self.manip_limit_nm + np.array([1,-1,1,-1])
+        if self.manip_limit_nm is not None:
+            self.inner_limit_nm = self.manip_limit_nm + np.array([1,-1,1,-1])
+            self.goal_limit_nm = self.manip_limit_nm + np.array([2,-2,2,-2])
         self.offset_nm = offset_nm
         self.len_nm = im_size_nm
 
@@ -39,6 +40,7 @@ class RealExpEnv:
         self.template_min_x = template_min_x
 
         self.lattice_constant = 0.28
+        self.bottom = bottom
         
     def reset(self):
         self.len = 0
@@ -113,8 +115,8 @@ class RealExpEnv:
     def scan_atom(self):
         img_forward, img_backward, offset_nm, len_nm = self.createc_controller.scan_image()
         self.img_info = {'img_forward':img_forward,'img_backward':img_backward, 'offset_nm':offset_nm, 'len_nm':len_nm}
-        atom_absolute_nm_f, atom_relative_nm_f, template_nm_f, template_wh_f  = get_atom_coordinate_nm(img_forward, offset_nm, len_nm, self.template, self.template_max_y)
-        atom_absolute_nm_b, atom_relative_nm_b, template_nm_b, template_wh_b  = get_atom_coordinate_nm(img_backward, offset_nm, len_nm, self.template, self.template_max_y)
+        atom_absolute_nm_f, atom_relative_nm_f, template_nm_f, template_wh_f  = get_atom_coordinate_nm(img_forward, offset_nm, len_nm, self.template, self.template_max_y, self.bottom)
+        atom_absolute_nm_b, atom_relative_nm_b, template_nm_b, template_wh_b  = get_atom_coordinate_nm(img_backward, offset_nm, len_nm, self.template, self.template_max_y, self.bottom)
         self.atom_absolute_nm_f = atom_absolute_nm_f
         self.atom_relative_nm_f = atom_relative_nm_f
         self.atom_absolute_nm_b = atom_absolute_nm_b
@@ -144,13 +146,15 @@ class RealExpEnv:
         return self.atom_absolute_nm, self.atom_relative_nm
     
     def get_destination(self, atom_relative_nm, atom_absolute_nm, goal_nm):
-        r = np.random.random()
-        #angle_center = np.arctan2(atom_absolute_nm[1]-np.mean(self.manip_limit_nm[2:]), atom_absolute_nm[0]-np.mean(self.manip_limit_nm[:2]))
-        #angle = angle_center - 1.5*np.pi + np.pi*r
-        angle = 2*np.pi*r
-        dr = goal_nm*np.array([np.cos(angle), np.sin(angle)])
+        while True:
+            r = np.random.random()
+            angle = 2*np.pi*r
+            dr = goal_nm*np.array([np.cos(angle), np.sin(angle)])
+            destination_absolute_nm = atom_absolute_nm + dr
+            if not self.out_of_range(destination_absolute_nm, self.goal_limit_nm):
+                break
         destination_relative_nm = atom_relative_nm + dr
-        destination_absolute_nm = atom_absolute_nm + dr
+
         return destination_relative_nm, destination_absolute_nm, dr/self.goal_nm
         
     def action_to_latman_input(self, action):
@@ -158,21 +162,12 @@ class RealExpEnv:
         y_start_nm = action[1]*self.step_nm
         x_end_nm = action[2]*self.goal_nm
         y_end_nm = action[3]*self.goal_nm
-        mvolt = action[4]*self.max_mvolt
-        pcurrent = action[5]*self.max_pcurrent_to_mvolt_ratio*mvolt
+        mvolt = np.clip(action[4], a_min = None, a_max=0.97)*self.max_mvolt
+        pcurrent = np.clip(action[5], a_min = None, a_max=0.97)*self.max_pcurrent_to_mvolt_ratio*mvolt
         return x_start_nm , y_start_nm, x_end_nm, y_end_nm, mvolt, pcurrent
     
     def detect_current_jump(self, current):
-        '''if current is not None:
-            gradient = np.gradient(current)
-            gradient_ = []
-            n = 3
-            for i in range(gradient.shape[0]-n):
-                gradient_.append(np.mean(gradient[i:i+n]))
-            gradient_ = np.array(gradient_)
-            return np.any(np.abs(gradient_)>self.current_jump*np.std(current))
-        else:
-            return False'''
+        
         if current is not None:
             diff = findiff.FinDiff(0,1,acc=6)(current)[3:-3]
             return np.sum(np.abs(diff)>self.current_jump*np.std(current)) > 2
@@ -190,15 +185,6 @@ class RealExpEnv:
         y_start_nm = np.clip(y_start_nm, a_min=self.manip_limit_nm[2], a_max=self.manip_limit_nm[3])
         x_end_nm = np.clip(x_end_nm, a_min=self.manip_limit_nm[0], a_max=self.manip_limit_nm[1])
         y_end_nm = np.clip(y_end_nm, a_min=self.manip_limit_nm[2], a_max=self.manip_limit_nm[3])
-        '''[x_start_nm, y_start_nm] = self.tip_nm
-        [x_end_nm, y_end_nm] = self.tip_nm + np.array([dx_nm, dy_nm])
-        x_end_nm = np.clip(x_end_nm, a_min=self.manip_limit_nm[0], a_max=self.manip_limit_nm[1])
-        y_end_nm = np.clip(y_end_nm, a_min=self.manip_limit_nm[2], a_max=self.manip_limit_nm[3])
-        norm = np.linalg.norm(np.array([x_end_nm, y_end_nm]) - self.atom_start_absolute_nm)
-        if norm > self.goal_nm:
-            [x_end_nm, y_end_nm] = self.atom_start_absolute_nm + self.goal_nm*(np.array([x_end_nm, y_end_nm]) - self.atom_start_absolute_nm)/norm
-        x_end_nm = np.clip(x_end_nm, a_min=self.manip_limit_nm[0], a_max=self.manip_limit_nm[1])
-        y_end_nm = np.clip(y_end_nm, a_min=self.manip_limit_nm[2], a_max=self.manip_limit_nm[3])'''
         if [x_start_nm, y_start_nm] != [x_end_nm, y_end_nm]:
             #print(x_start_nm, y_start_nm, x_end_nm, y_end_nm, mvoltage, pcurrent, self.offset_nm, self.len_nm)
             data = self.createc_controller.lat_manipulation(x_start_nm, y_start_nm, x_end_nm, y_end_nm, mvoltage, pcurrent, self.offset_nm, self.len_nm)
@@ -217,8 +203,6 @@ class RealExpEnv:
     def check_similarity(self):
         #pdb.set_trace()
         self.atom_absolute_nm, self.atom_relative_nm = self.scan_atom()
-        '''
-        cos_similarity_start = np.inner(self.atom_relative_nm,self.atom_start_relative_nm)/(np.linalg.norm(self.atom_relative_nm)*np.linalg.norm(self.atom_start_relative_nm))'''
         dist_destination = np.linalg.norm(self.atom_absolute_nm - self.destination_absolute_nm)
         dist_start = np.linalg.norm(self.atom_absolute_nm - self.atom_start_absolute_nm)
         a = self.atom_absolute_nm - self.atom_start_absolute_nm
@@ -232,7 +216,7 @@ class RealExpEnv:
 
     def pull_atom_back(self):
         print('pulling atom back to center')
-        self.createc_controller.lat_manipulation(self.atom_absolute_nm[0], self.atom_absolute_nm[1], np.mean(self.manip_limit_nm[:2]), np.mean(self.manip_limit_nm[2:]), 10, 60000, self.offset_nm, self.len_nm)
+        self.createc_controller.lat_manipulation(self.atom_absolute_nm[0], self.atom_absolute_nm[1], np.mean(self.manip_limit_nm[:2])+2*np.random.random()-1, np.mean(self.manip_limit_nm[2:])+2*np.random.random()-1, 10, 57000, self.offset_nm, self.len_nm)
 
         
 

@@ -1,44 +1,36 @@
-from Environment.Env import RealExpEnv
-from Environment.get_atom_coordinate import get_atom_coordinate_nm, get_all_atom_coordinate_nm, get_atom_coordinate_nm_with_anchor
-
+from Env1 import RealExpEnv
+from createc_control import Createc_Controller
 import numpy as np
+from matplotlib import pyplot as plt
+import get_atom_coordinate
+import importlib
+importlib.reload(get_atom_coordinate)
+from get_atom_coordinate import get_atom_coordinate_nm, get_all_atom_coordinate_nm
 import scipy.spatial as spatial
-from scipy.optimize import linear_sum_assignment
-
-def circle(x, y, r, p = 100):
-    x_, y_ = [], []
-    for i in range(p):
-        x_.append(x+r*np.cos(2*i*np.pi/p))
-        y_.append(y+r*np.sin(2*i*np.pi/p))
-    return x_, y_ 
-
-def assignment(start, goal):
-    cost_matrix = spatial.distance.cdist(np.array(start)[:,:2], np.array(goal)[:,:2])
-    row_ind, col_ind = linear_sum_assignment(cost_matrix)
-    cost = cost_matrix[row_ind, col_ind]
-    total_cost = np.sum(cost)
-    return np.array(start)[row_ind,:], np.array(goal)[col_ind,:], cost, total_cost
+import findiff
+import pdb
+import scipy
 
 class Structure_Builder(RealExpEnv):
     def __init__(self, step_nm, max_mvolt, max_pcurrent_to_mvolt_ratio, goal_nm, current_jump, im_size_nm, offset_nm,
-                 pixel, scan_mV, max_len, correct_drift = False):
+                 manip_limit_nm, pixel, scan_mV, max_len, correct_drift = False):
         super(Structure_Builder, self).__init__(step_nm, max_mvolt, max_pcurrent_to_mvolt_ratio, goal_nm, None, current_jump, im_size_nm, offset_nm,
-                 None, pixel, None, None, scan_mV, max_len, correct_drift = False)
+                 manip_limit_nm, pixel, None, None, scan_mV, max_len, correct_drift = False)
         self.atom_absolute_nm_f = None
         self.atom_absolute_nm_b = None
         self.large_DX_DDeltaX = float(self.createc_controller.stm.getparam('DX/DDeltaX'))
 
-    def reset(self, destination_nm, anchor_nm, offset_nm, len_nm, large_len_nm):
+    def reset(self, final_destination_absolute_nm, offset_nm, len_nm, large_len_nm):
         self.len = 0
-        self.atom_absolute_nm, self.anchor_nm = self.scan_atom(anchor_nm, offset_nm, len_nm, large_len_nm)
+        self.atom_absolute_nm = self.scan_atom(offset_nm, len_nm, large_len_nm)
 
         self.atom_start_absolute_nm = self.atom_absolute_nm
-        destination_nm_with_correction = destination_nm + self.anchor_nm - anchor_nm
-        self.destination_absolute_nm, self.goal = self.get_destination(self.atom_start_absolute_nm, destination_nm_with_correction)
-
+        self.destination_absolute_nm, self.goal = self.get_destination(self.atom_start_absolute_nm, final_destination_absolute_nm)
         info = {'start_absolute_nm':self.atom_start_absolute_nm, 'goal_absolute_nm':self.destination_absolute_nm,
                 'start_absolute_nm_f':self.atom_absolute_nm_f, 'start_absolute_nm_b':self.atom_absolute_nm_b, 'img_info':self.img_info}
         return np.concatenate((self.goal, (self.atom_absolute_nm - self.atom_start_absolute_nm)/self.goal_nm)), info
+
+
     def step(self, action):
         x_start_nm , y_start_nm, x_end_nm, y_end_nm, mvolt, pcurrent = self.action_to_latman_input(action)
         print(x_start_nm , y_start_nm, x_end_nm, y_end_nm, mvolt, pcurrent)
@@ -62,6 +54,7 @@ class Structure_Builder(RealExpEnv):
                 if (dist_start/self.goal_nm) > 1.5 or self.dist_destination < 0.16:
                     done = True
 
+
         next_state = np.concatenate((self.goal, (self.atom_absolute_nm - self.atom_start_absolute_nm)/self.goal_nm))
 
         info['atom_absolute_nm'] = self.atom_absolute_nm
@@ -70,30 +63,37 @@ class Structure_Builder(RealExpEnv):
         info['img_info'] = self.img_info
         return next_state, None, done, info
 
-    def scan_atom(self, anchor_nm = None, offset_nm = None, len_nm = None, large_len_nm = None):
+    def scan_atom(self, offset_nm = None, len_nm = None, large_len_nm = None):
         if offset_nm is None:
             offset_nm = self.offset_nm
         if len_nm is None:
             len_nm = self.len_nm
-        if anchor_nm is None:
-            anchor_nm = self.anchor_nm
+
         if large_len_nm is not None:
             small_DX_DDeltaX = int(self.large_DX_DDeltaX*len_nm/large_len_nm)
             self.createc_controller.stm.setparam('DX/DDeltaX', small_DX_DDeltaX)
-
         self.createc_controller.offset_nm = offset_nm
         self.createc_controller.im_size_nm = len_nm
         self.offset_nm = offset_nm
         self.len_nm = len_nm
-        self.anchor_nm = anchor_nm
         img_forward, img_backward, offset_nm, len_nm = self.createc_controller.scan_image()
         self.img_info = {'img_forward':img_forward,'img_backward':img_backward, 'offset_nm':offset_nm, 'len_nm':len_nm}
-        self.atom_absolute_nm_f, self.anchor_nm_f = get_atom_coordinate_nm_with_anchor(img_forward, offset_nm, len_nm, anchor_nm)
+        self.atom_absolute_nm_f, _, _, _ = get_atom_coordinate_nm(img_forward, offset_nm, len_nm, None, None)
 
-        self.atom_absolute_nm_b, self.anchor_nm_b = get_atom_coordinate_nm_with_anchor(img_backward, offset_nm, len_nm, anchor_nm)
+        self.atom_absolute_nm_b, _, _, _ = get_atom_coordinate_nm(img_backward, offset_nm, len_nm, None, None)
         self.atom_absolute_nm = 0.5*(self.atom_absolute_nm_f+self.atom_absolute_nm_b)
-        self.anchor_nm = 0.5*(self.anchor_nm_f+self.anchor_nm_b)
-        return self.atom_absolute_nm, self.anchor_nm
+        print('forward:', self.atom_absolute_nm_f,'backward:',self.atom_absolute_nm_b)
+        return self.atom_absolute_nm
+
+        '''    def remove_outliers(self,all_atom_absolute_nm_b,all_atom_absolute_nm_f):
+        pdb.set_trace()
+        shorter_array = all_atom_absolute_nm_b if len(all_atom_absolute_nm_b)<len(all_atom_absolute_nm_f) else all_atom_absolute_nm_f
+        longer_array = all_atom_absolute_nm_b if len(all_atom_absolute_nm_b)>len(all_atom_absolute_nm_f) else all_atom_absolute_nm_f
+        nearest_ys = []
+        for atom in longer_array:
+            nearest_ys.append(sorted(atom-shorter_array, key=lambda x: x[1])[0])
+        return all_atom_absolute_nm_b, all_atom_absolute_nm_f'''
+
 
     def scan_all_atoms(self, offset_nm, len_nm):
         self.createc_controller.stm.setparam('DX/DDeltaX', self.large_DX_DDeltaX)
@@ -102,6 +102,8 @@ class Structure_Builder(RealExpEnv):
         self.offset_nm = offset_nm
         self.len_nm = len_nm
         img_forward, img_backward, offset_nm, len_nm = self.createc_controller.scan_image()
+        print(offset_nm)
+        print(len_nm)
         all_atom_absolute_nm_f = get_all_atom_coordinate_nm(img_forward, offset_nm, len_nm)
         all_atom_absolute_nm_b = get_all_atom_coordinate_nm(img_backward, offset_nm, len_nm)
 
@@ -122,11 +124,32 @@ class Structure_Builder(RealExpEnv):
         self.all_atom_absolute_nm = all_atom_absolute_nm
         return all_atom_absolute_nm, img_forward, img_backward, offset_nm, len_nm
 
-    def get_destination(self, atom_start_absolute_nm, destination_absolute_nm):
-        angle = np.arctan2((destination_absolute_nm-atom_start_absolute_nm)[1],(destination_absolute_nm-atom_start_absolute_nm)[0])
-        goal_nm = min(self.goal_nm, np.linalg.norm(destination_absolute_nm-atom_start_absolute_nm))
+    def get_destination(self, atom_start_absolute_nm, final_destination_absolute_nm):
+        angle = np.arctan2((final_destination_absolute_nm-atom_start_absolute_nm)[1],(final_destination_absolute_nm-atom_start_absolute_nm)[0])
+        goal_nm = min(self.goal_nm, np.linalg.norm(final_destination_absolute_nm-atom_start_absolute_nm))
         destination_absolute_nm = atom_start_absolute_nm + goal_nm*np.array([np.cos(angle),np.sin(angle)])
-        return destination_absolute_nm, goal_nm*np.array([np.cos(angle),np.sin(angle)]/self.goal_nm)
+
+        return destination_absolute_nm, goal_nm*np.array([np.cos(angle),np.sin(angle)])
+
+    def check_similarity(self):
+        #pdb.set_trace()
+        self.atom_absolute_nm = self.scan_atom()
+
+        dist_destination = np.linalg.norm(self.atom_absolute_nm - self.destination_absolute_nm)
+        dist_start = np.linalg.norm(self.atom_absolute_nm - self.atom_start_absolute_nm)
+        a = self.atom_absolute_nm - self.atom_start_absolute_nm
+        b = self.destination_absolute_nm - self.atom_start_absolute_nm
+        cos_similarity_destination = np.inner(a,b)/(self.goal_nm*np.clip(np.linalg.norm(a), a_min=self.goal_nm, a_max=None))
+        return dist_destination, dist_start, cos_similarity_destination
+
+    def get_script_start_end(self, atom_start_absolute_nm, final_destination_absolute_nm):
+        goal_nm = np.linalg.norm(final_destination_absolute_nm - atom_start_absolute_nm)
+        goal_nm = np.clip(goal_nm, a_min = None, a_max = self.goal_nm)
+
+        angle = np.arctan2((final_destination_absolute_nm-atom_start_absolute_nm)[1],(final_destination_absolute_nm-atom_start_absolute_nm)[0])
+        destination_absolute_nm = atom_start_absolute_nm + goal_nm*np.array([np.cos(angle),np.sin(angle)])
+        return destination_absolute_nm
+
 
     def step_latman(self, x_start_nm, y_start_nm, x_end_nm, y_end_nm, mvoltage, pcurrent):
         #pdb.set_trace()
@@ -135,6 +158,15 @@ class Structure_Builder(RealExpEnv):
         x_end_nm+=self.atom_absolute_nm[0]
         y_start_nm+=self.atom_absolute_nm[1]
         y_end_nm+=self.atom_absolute_nm[1]
+        '''[x_start_nm, y_start_nm] = self.tip_nm
+        [x_end_nm, y_end_nm] = self.tip_nm + np.array([dx_nm, dy_nm])
+        x_end_nm = np.clip(x_end_nm, a_min=self.manip_limit_nm[0], a_max=self.manip_limit_nm[1])
+        y_end_nm = np.clip(y_end_nm, a_min=self.manip_limit_nm[2], a_max=self.manip_limit_nm[3])
+        norm = np.linalg.norm(np.array([x_end_nm, y_end_nm]) - self.atom_start_absolute_nm)
+        if norm > self.goal_nm:
+            [x_end_nm, y_end_nm] = self.atom_start_absolute_nm + self.goal_nm*(np.array([x_end_nm, y_end_nm]) - self.atom_start_absolute_nm)/norm
+        x_end_nm = np.clip(x_end_nm, a_min=self.manip_limit_nm[0], a_max=self.manip_limit_nm[1])
+        y_end_nm = np.clip(y_end_nm, a_min=self.manip_limit_nm[2], a_max=self.manip_limit_nm[3])'''
         if [x_start_nm, y_start_nm] != [x_end_nm, y_end_nm]:
             #print(x_start_nm, y_start_nm, x_end_nm, y_end_nm, mvoltage, pcurrent, self.offset_nm, self.len_nm)
             data = self.createc_controller.lat_manipulation(x_start_nm, y_start_nm, x_end_nm, y_end_nm, mvoltage, pcurrent, self.offset_nm, self.len_nm)
